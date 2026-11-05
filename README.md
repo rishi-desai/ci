@@ -42,6 +42,33 @@ Optional inputs: `task` (default `ci`) and `timeout-minutes` (default 15), passe
 tools with a pinned mise → cache uv/npm downloads keyed on lockfiles → `mise run <task>`.
 Concurrency cancels superseded runs per repo, branch and event.
 
+## Deploying to the Pi: `pi/`
+
+`pi/ci-gated-update` deploys an app on the Pi only when the newest push run of its CI workflow
+passed for the exact commit at the tip of its branch. A systemd timer checks every 5 minutes,
+so the Pi pulls changes and GitHub never needs a way into the home network. It is aurora's
+`deploy/pi/update.sh` with everything Aurora-specific moved into a per-app config: an optional
+pre-deploy unit, build command, restart unit and health check. A failed build or health check
+rolls back to the previous commit, records the bad SHA so it is never retried, and fires an alert.
+
+Set up an app (on the Pi, as yourself):
+
+```sh
+git clone https://github.com/rishi-desai/ci ~/homelab/ci     # once; uses the existing gh login
+cp ~/homelab/ci/pi/apps/aurora.conf.example ~/aurora.conf     # or write one for another app
+~/homelab/ci/pi/install.sh aurora ~/aurora.conf
+sudo systemctl start ci-gated-update@aurora && journalctl -u ci-gated-update@aurora -n 20
+```
+
+`install.sh` copies the config to `/etc/ci-gated-update/<app>.conf` (root-owned), installs the
+shared `ci-gated-update@` units, allows exactly that app's restart/pre-deploy commands in
+`/etc/sudoers.d/ci-gated-update-<app>`, disables the app's old updater (`REPLACES_TIMER`) and
+enables `ci-gated-update@<app>.timer`. Pulling a newer `~/homelab/ci` changes nothing until you
+re-run `install.sh`. An app needs CI first: without a passing push run, nothing deploys.
+
+Rolling back Aurora to its own updater: `sudo systemctl disable --now ci-gated-update@aurora.timer
+&& sudo systemctl enable --now aurora-update.timer`.
+
 ## Maintaining it
 
 - Action SHAs are pinned here only; Dependabot proposes updates weekly.

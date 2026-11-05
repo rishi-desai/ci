@@ -1,0 +1,13 @@
+[tools]
+# Debian 12's /usr/bin/python3: pi/check_ci.py must run on the oldest Python a Pi might have.
+python = "3.11"
+shellcheck = "0.11.0"
+actionlint = "1.7.12"
+
+[tasks.ci]
+description = "Run the same checks as CI (lint scripts and workflows, Pi updater tests)"
+run = [
+  "shellcheck pi/ci-gated-update pi/install.sh pi/alert.sh",
+  "actionlint",
+  "python -m unittest discover -s pi/tests -v",
+]
