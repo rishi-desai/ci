@@ -1,0 +1,30 @@
+# CI-gated deploy settings for aurora. Install with: pi/install.sh aurora pi/apps/aurora.conf.example
+# Literal KEY=value; values can't contain quotes. Relative commands run in APP_DIR.
+
+# Required: the app's name (matches the install argument) and its git checkout on the Pi.
+APP_NAME=aurora
+APP_DIR=/home/rishi/homelab/aurora
+
+# Branch to follow and the workflow file whose push run must pass (defaults: main, ci.yml).
+BRANCH=main
+WORKFLOW=ci.yml
+
+# Lock, failed-SHA and CI-payload files (default: data, relative to APP_DIR). Keeping aurora's
+# data/ means its old updater and this one share a lock and never run at the same time.
+STATE_DIR=data
+
+# Optional: started with sudo before the fast-forward (here: a pre-deploy database backup).
+PRE_DEPLOY_UNIT=aurora-pre-update-backup
+
+# Optional: run after the fast-forward, then the restart, then the health check.
+BUILD_CMD=deploy/pi/build.sh
+RESTART_UNIT=aurora
+HEALTH_CMD=deploy/pi/healthcheck.sh --readiness
+HEALTH_TRIES=24
+HEALTH_DELAY=5
+
+# Optional: changes to these git pathspecs print a reminder to re-run the app's installer.
+REINSTALL_PATHS=deploy/pi/install.sh deploy/pi/*.service deploy/pi/*.timer
+
+# Optional: an older updater timer that install.sh disables, so two updaters don't run.
+REPLACES_TIMER=aurora-update.timer

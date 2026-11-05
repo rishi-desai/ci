@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Deploy one app on this Pi, but only a commit whose GitHub CI passed on its branch.
+# Usage: ci-gated-update /etc/ci-gated-update/<app>.conf   (normally ci-gated-update@<app>.timer)
+#
+# Generalized from aurora's deploy/pi/update.sh. Each run, as the checkout's owner:
+#   1. skip unless the checkout is clean, on BRANCH, and origin/BRANCH moved forward from HEAD
+#   2. skip unless the newest push run of WORKFLOW for that exact SHA succeeded (check_ci.py)
+#   3. start PRE_DEPLOY_UNIT (e.g. a backup), fast-forward, BUILD_CMD, restart RESTART_UNIT,
+#      then HEALTH_CMD until it passes or HEALTH_TRIES runs out
+#   4. if step 3 fails: remember the SHA (never retried), reset to the old commit, redeploy it,
+#      and exit 1 so the unit's OnFailure alert fires
+# Pending, failed or missing CI is not a failure: the running version stays and the run exits 0.
+#
+# Config is literal KEY=value lines (no quotes inside values) and is never executed as shell.
+# BUILD_CMD and HEALTH_CMD are run with `bash -c` in APP_DIR, so put anything that needs
+# quoting in a script in the repo. See pi/apps/*.conf.example for every key.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CONF="${1:?usage: ci-gated-update <app.conf>}"
+
+[[ $EUID -ne 0 ]] || { echo "run as the checkout's owner, not root"; exit 1; }
+[[ -r "$CONF" ]] || { echo "cannot read config $CONF"; exit 1; }
+# The config names commands to run, so refuse one that someone else could edit.
+perms="$(stat -c '%a' "$CONF" 2>/dev/null || stat -f '%Lp' "$CONF")"
+(( (8#$perms & 8#022) == 0 )) || { echo "$CONF is group- or world-writable: chmod go-w $CONF"; exit 1; }
+
+# conf KEY [default]: the last KEY=value line in $CONF, surrounding quotes dropped.
+conf() {
+  local value
+  value="$(sed -nE "s/^[[:space:]]*$1=['\"]?([^'\"]*)['\"]?[[:space:]]*$/\1/p" "$CONF" | tail -n 1)"
+  printf '%s' "${value:-${2:-}}"
+}
+
+APP_NAME="$(conf APP_NAME)"
+APP_DIR="$(conf APP_DIR)"
+[[ -n "$APP_NAME" && -d "$APP_DIR/.git" ]] || { echo "$CONF needs APP_NAME and an APP_DIR git checkout"; exit 1; }
+BRANCH="$(conf BRANCH main)"
+WORKFLOW="$(conf WORKFLOW ci.yml)"
+STATE_DIR="$(conf STATE_DIR data)"
+[[ "$STATE_DIR" == /* ]] || STATE_DIR="$APP_DIR/$STATE_DIR"
+BUILD_CMD="$(conf BUILD_CMD)"
+RESTART_UNIT="$(conf RESTART_UNIT)"
+PRE_DEPLOY_UNIT="$(conf PRE_DEPLOY_UNIT)"
+HEALTH_CMD="$(conf HEALTH_CMD)"
+HEALTH_TRIES="$(conf HEALTH_TRIES 24)"
+HEALTH_DELAY="$(conf HEALTH_DELAY 5)"
+REINSTALL_PATHS="$(conf REINSTALL_PATHS)"
+FAILED_FILE="$STATE_DIR/.update-failed"
+
+cd "$APP_DIR"
+mkdir -p "$STATE_DIR"
+# The timer and a manual run must not build or reset this checkout at the same time.
+exec 9>"$STATE_DIR/.update.lock"
+flock -n 9 || { echo "another update of $APP_NAME is running: skipping"; exit 0; }
+
+SYSTEMCTL="$(command -v systemctl || true)"
+need_sudo() {
+  [[ -n "$SYSTEMCTL" ]] || { echo "systemctl not found, but $CONF names a unit"; exit 1; }
+  sudo -n -l "$SYSTEMCTL" "$@" >/dev/null 2>&1 \
+    || { echo "not allowed to run 'systemctl $*' without a password: run pi/install.sh for $APP_NAME"; exit 1; }
+}
+[[ -z "$RESTART_UNIT" ]] || need_sudo restart "$RESTART_UNIT"
+[[ -z "$PRE_DEPLOY_UNIT" ]] || need_sudo start "$PRE_DEPLOY_UNIT"
+
+current="$(git symbolic-ref --short -q HEAD || true)"
+[[ "$current" == "$BRANCH" ]] || { echo "checkout is on '${current:-a detached HEAD}', not $BRANCH: skipping"; exit 0; }
+[[ -z "$(git status --porcelain --untracked-files=no)" ]] \
+  || { echo "uncommitted edits in $APP_DIR: skipping (git status)"; exit 0; }
+
+git fetch --quiet origin "$BRANCH"
+old="$(git rev-parse HEAD)"
+new="$(git rev-parse "origin/$BRANCH")"
+[[ "$old" != "$new" ]] || exit 0
+git merge-base --is-ancestor "$old" "$new" \
+  || { echo "local commits that aren't on origin/$BRANCH: skipping"; exit 0; }
+if [[ -f "$FAILED_FILE" && "$(cat "$FAILED_FILE")" == "$new" ]]; then
+  exit 0
+fi
+
+command -v gh >/dev/null || { echo "gh not found: install it and run gh auth login"; exit 1; }
+ci_payload="$(mktemp "$STATE_DIR/.ci.XXXXXX")"
+trap 'rm -f "$ci_payload"' EXIT
+# gh resolves {owner}/{repo} from this checkout's origin.
+gh api --hostname github.com \
+  "repos/{owner}/{repo}/actions/workflows/$WORKFLOW/runs?head_sha=$new&event=push&per_page=100" > "$ci_payload"
+ci_status=0
+python3 "$HERE/check_ci.py" "$new" "$BRANCH" < "$ci_payload" || ci_status=$?
+[[ "$ci_status" -ne 3 ]] || exit 0
+[[ "$ci_status" -eq 0 ]] || exit "$ci_status"
+
+run_in_app() { (cd "$APP_DIR" && bash -c "$1"); }
+healthy() {
+  [[ -n "$HEALTH_CMD" ]] || return 0
+  for _ in $(seq "$HEALTH_TRIES"); do
+    run_in_app "$HEALTH_CMD" >/dev/null 2>&1 && return 0
+    sleep "$HEALTH_DELAY"
+  done
+  return 1
+}
+deploy() {
+  { [[ -z "$BUILD_CMD" ]] || run_in_app "$BUILD_CMD"; } \
+    && { [[ -z "$RESTART_UNIT" ]] || sudo -n "$SYSTEMCTL" restart "$RESTART_UNIT"; } \
+    && healthy
+}
+
+echo ">>> Updating $APP_NAME ${old:0:7} -> ${new:0:7} (CI passed for $new)"
+git log --oneline "$old..$new"
+[[ -z "$PRE_DEPLOY_UNIT" ]] || sudo -n "$SYSTEMCTL" start "$PRE_DEPLOY_UNIT"
+git merge --quiet --ff-only "$new"
+if deploy; then
+  rm -f "$FAILED_FILE"
+  echo ">>> Running $APP_NAME ${new:0:7}"
+  # Unit and installer changes need a human on the Pi; say so instead of applying them.
+  # read -a splits on spaces without glob expansion: these are git pathspecs, not shell globs.
+  read -ra reinstall_paths <<< "$REINSTALL_PATHS"
+  if (( ${#reinstall_paths[@]} )) && ! git diff --quiet "$old" "$new" -- "${reinstall_paths[@]}"; then
+    echo ">>> This update changed: $REINSTALL_PATHS. Re-run the app's installer on the Pi."
+  fi
+  exit 0
+fi
+
+echo ">>> $APP_NAME ${new:0:7} failed to build or isn't healthy: going back to ${old:0:7}"
+echo "$new" > "$FAILED_FILE"
+git reset --quiet --hard "$old"
+if deploy; then
+  echo ">>> Back on ${old:0:7}"
+else
+  echo ">>> ${old:0:7} isn't healthy either${RESTART_UNIT:+: journalctl -u $RESTART_UNIT -n 50}"
+fi
+# Even a successful rollback is an operational failure that must trigger OnFailure.
+exit 1

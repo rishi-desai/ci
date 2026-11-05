@@ -1,0 +1,18 @@
+# Template, filled in by pi/install.sh. The instance is the app: ci-gated-update@aurora.service
+# reads /etc/ci-gated-update/aurora.conf. Run it now with: sudo systemctl start ci-gated-update@<app>
+[Unit]
+Description=CI-gated deploy of %i
+Wants=network-online.target
+After=network-online.target
+OnFailure=ci-gated-update-alert@%i.service
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@GROUP@
+# Build commands need Homebrew's uv, node, gh and flock, which aren't on systemd's default PATH.
+Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/etc/ci-gated-update/ops.env
+ExecStart=@CI_DIR@/pi/ci-gated-update /etc/ci-gated-update/%i.conf
+TimeoutStartSec=20min
+UMask=0077
