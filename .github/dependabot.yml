@@ -1,0 +1,7 @@
+# Keeps the pinned action SHAs in this repo current; every caller picks them up via @v1.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

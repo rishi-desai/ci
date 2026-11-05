@@ -1,0 +1,55 @@
+# Shared CI for every personal repo. A repo calls this with a ~10-line workflow and owns
+# what "CI" means through a mise task (default `ci`), so `mise run ci` locally runs exactly
+# what this job runs. Tool versions come from the repo's mise.toml; nothing is detected.
+name: Shared CI
+
+on:
+  workflow_call:
+    inputs:
+      task:
+        description: mise task that runs the repo's checks
+        type: string
+        default: ci
+      timeout-minutes:
+        description: Hard stop for the job
+        type: number
+        default: 15
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # `github.*` here is the caller's context, so each repo/branch/event gets its own lane.
+    concurrency:
+      group: ci-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same mise as the Mac (`mise --version`) so local and CI resolve tools identically.
+      - name: Install mise and the repo's tools
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.10.17
+
+      # Package-manager download caches only (never node_modules/.venv), keyed on lockfiles.
+      - name: Cache dependency downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.npm
+          key: deps-${{ runner.os }}-${{ hashFiles('**/uv.lock', '**/package-lock.json') }}
+          restore-keys: deps-${{ runner.os }}-
+
+      # The task name goes through env, not ${{ }} in the script, so it can't inject shell.
+      - name: mise run ${{ inputs.task }}
+        env:
+          TASK: ${{ inputs.task }}
+        run: mise run "$TASK"
