@@ -3,11 +3,14 @@
 python = "3.11"
 shellcheck = "0.11.0"
 actionlint = "1.7.12"
+zizmor = "1.32.0"
 
 [tasks.ci]
-description = "Run the same checks as CI (lint scripts and workflows, Pi updater tests)"
+description = "Run the same checks as CI (lint scripts and workflows, audit workflow security, Pi updater tests)"
 run = [
   "shellcheck pi/ci-gated-update pi/install.sh pi/alert.sh",
   "actionlint",
+  # --offline: CI passes no GitHub token, so local runs skip the same token-only audits.
+  "zizmor --offline .",
   "python -m unittest discover -s pi/tests -v",
 ]
