@@ -46,8 +46,9 @@ check through a mise task, so `mise run ci` on the Mac runs exactly what GitHub 
 4. Set up the repo on GitHub:
 
    - **Ruleset on `main`** (Settings → Rules → Rulesets → New branch ruleset, target `main`):
-     require a pull request; require the status check `CI / CI` with "Require branches to be up
-     to date before merging"; block force pushes; restrict deletions. Don't require an approving
+     require a pull request; require the status check `ci / CI` (caller job id `ci` from step 2,
+     then the shared job's name) with "Require branches to be up to date before merging"; block
+     force pushes; restrict deletions. Don't require an approving
      review: PRs opened under your own `gh` login can't be approved by you, so they'd never merge.
    - **Dependabot** for the repo's own packages, with minor and patch updates grouped into one
      PR per ecosystem. `.github/dependabot.yml`:
