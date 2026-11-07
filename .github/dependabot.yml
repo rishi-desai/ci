@@ -5,3 +5,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Wait a week before proposing a new release, so a compromised one is likely yanked first.
+    cooldown:
+      default-days: 7

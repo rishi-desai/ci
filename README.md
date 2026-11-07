@@ -10,11 +10,20 @@ check through a mise task, so `mise run ci` on the Mac runs exactly what GitHub 
    ```toml
    [tools]
    node = "24"
+   gitleaks = "8.30.1"
 
    [tasks.ci]
    description = "Run the same checks as CI"
-   run = ["npm ci --no-audit --no-fund", "npm run lint", "npm test", "npm run build"]
+   run = [
+     "gitleaks git --redact --no-banner",
+     "npm ci --no-audit --no-fund", "npm run lint", "npm test", "npm run build",
+   ]
    ```
+
+   The `gitleaks` line (a secret scanner) is recommended for every repo. Use `gitleaks git`, not
+   `gitleaks dir`: `dir` ignores `.gitignore`, so it would flag your local `.env` and scan
+   `node_modules/` that CI never sees. CI checks out one commit, so there it scans the current
+   tree; locally it also scans history, which is stricter, never looser.
 
 2. Add `.github/workflows/ci.yml`:
 
@@ -33,6 +42,32 @@ check through a mise task, so `mise run ci` on the Mac runs exactly what GitHub 
    ```
 
 3. Run `mise run ci` locally; if it passes, CI will too.
+
+4. Set up the repo on GitHub:
+
+   - **Ruleset on `main`** (Settings → Rules → Rulesets → New branch ruleset, target `main`):
+     require a pull request; require the status check `ci / CI` (caller job id `ci` from step 2,
+     then the shared job's name) with "Require branches to be up to date before merging"; block
+     force pushes; restrict deletions. Don't require an approving
+     review: PRs opened under your own `gh` login can't be approved by you, so they'd never merge.
+   - **Dependabot** for the repo's own packages, with minor and patch updates grouped into one
+     PR per ecosystem. `.github/dependabot.yml`:
+
+     ```yaml
+     version: 2
+     updates:
+       - package-ecosystem: npm          # or pip, uv, cargo, ...
+         directory: /
+         schedule:
+           interval: weekly
+         cooldown:
+           default-days: 7               # let a bad release get yanked before it reaches you
+         groups:
+           minor-and-patch:
+             update-types: [minor, patch]
+     ```
+
+     Majors still arrive one PR each, since they're the ones that break things.
 
 Optional inputs: `task` (default `ci`) and `timeout-minutes` (default 15), passed with `with:`.
 
@@ -74,5 +109,9 @@ Rolling back Aurora to its own updater: `sudo systemctl disable --now ci-gated-u
 - Action SHAs are pinned here only; Dependabot proposes updates weekly.
 - Callers use the moving tag `v1`. After a compatible change: `git tag -f v1 && git push -f origin v1`.
   A breaking change gets `v2`, and repos move over one at a time.
-- This repo is private, so Settings → Actions → General → Access must be
-  "Accessible from repositories owned by the user", or callers fail with "workflow was not found".
+- This repo is public (it holds no secrets), so any repo can call the workflow and the Pi can
+  clone it without credentials. If it ever goes private, set Settings → Actions → General →
+  Access to "Accessible from repositories owned by the user", or callers fail with "workflow
+  was not found".
+- `mise run ci` here also runs zizmor (a security linter for GitHub Actions workflows) next to
+  actionlint. Fix its findings; if one must stay, add `# zizmor: ignore[<rule>]` with the reason.
